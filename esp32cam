@@ -1,0 +1,580 @@
+// Akıllı Süpürge Robot - ESP32-CAM Kodu
+#include <Arduino.h>
+#include <WiFi.h>
+#include <ESPAsyncWebServer.h>
+#include <WebSocketsServer.h>
+#include "esp_camera.h"
+#include "camera_pins.h"
+
+// WiFi ağ bilgileri
+const char* ssid = "AkilliSupurge_WiFi";
+const char* password = "12345678";
+
+// Web Sunucusu ve WebSocket
+AsyncWebServer server(80);
+WebSocketsServer webSocket = WebSocketsServer(81);
+
+// UART iletişimi için pin tanımlamaları
+#define RXD2 14  // ESP32-CAM'in RX pini (Arduino'nun TX pinine bağlanacak)
+#define TXD2 15  // ESP32-CAM'in TX pini (Arduino'nun RX pinine bağlanacak)
+
+// Durum değişkenleri
+bool isAutoMode = false;
+bool isVacuumOn = false;
+int lastDistance = 0;
+
+// HTML sayfası
+const char index_html[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Akıllı Süpürge Robot Kontrol</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      background-color: #f3f3f3;
+      margin: 0;
+      padding: 20px;
+      color: #333;
+    }
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+      background-color: white;
+      padding: 20px;
+      border-radius: 10px;
+      box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+    }
+    h1 {
+      color: #2c3e50;
+      text-align: center;
+      margin-bottom: 30px;
+    }
+    .row {
+      display: flex;
+      flex-wrap: wrap;
+      margin: 0 -10px;
+    }
+    .column {
+      flex: 1;
+      padding: 0 10px;
+      min-width: 300px;
+    }
+    .camera-view {
+      width: 100%;
+      background-color: #eee;
+      height: 300px;
+      margin-bottom: 20px;
+      border-radius: 8px;
+      overflow: hidden;
+      position: relative;
+    }
+    #cameraStream {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+    .control-panel {
+      background-color: #f9f9f9;
+      border-radius: 8px;
+      padding: 15px;
+      margin-bottom: 20px;
+    }
+    .mode-toggle {
+      display: flex;
+      justify-content: space-between;
+      margin-bottom: 20px;
+    }
+    .vacuum-toggle {
+      display: flex;
+      justify-content: center;
+      margin-bottom: 20px;
+    }
+    .btn {
+      padding: 10px 20px;
+      border: none;
+      border-radius: 5px;
+      cursor: pointer;
+      font-weight: bold;
+      transition: all 0.3s;
+    }
+    .btn-primary {
+      background-color: #3498db;
+      color: white;
+    }
+    .btn-primary:hover {
+      background-color: #2980b9;
+    }
+    .btn-success {
+      background-color: #2ecc71;
+      color: white;
+    }
+    .btn-success:hover {
+      background-color: #27ae60;
+    }
+    .btn-danger {
+      background-color: #e74c3c;
+      color: white;
+    }
+    .btn-danger:hover {
+      background-color: #c0392b;
+    }
+    .btn-secondary {
+      background-color: #7f8c8d;
+      color: white;
+    }
+    .btn-secondary:hover {
+      background-color: #636e6e;
+    }
+    .btn-active {
+      box-shadow: 0 0 8px rgba(0, 0, 0, 0.3);
+      transform: scale(1.05);
+    }
+    .manual-controls {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      grid-gap: 10px;
+      max-width: 300px;
+      margin: 0 auto;
+    }
+    .manual-controls button {
+      height: 60px;
+      font-size: 24px;
+    }
+    .manual-controls .btn-up {
+      grid-column: 2;
+      grid-row: 1;
+    }
+    .manual-controls .btn-left {
+      grid-column: 1;
+      grid-row: 2;
+    }
+    .manual-controls .btn-stop {
+      grid-column: 2;
+      grid-row: 2;
+    }
+    .manual-controls .btn-right {
+      grid-column: 3;
+      grid-row: 2;
+    }
+    .manual-controls .btn-down {
+      grid-column: 2;
+      grid-row: 3;
+    }
+    .status-panel {
+      background-color: #f9f9f9;
+      border-radius: 8px;
+      padding: 15px;
+    }
+    .status-item {
+      display: flex;
+      justify-content: space-between;
+      margin-bottom: 10px;
+      padding-bottom: 10px;
+      border-bottom: 1px solid #eee;
+    }
+    .status-label {
+      font-weight: bold;
+    }
+    .status-value {
+      background-color: #eee;
+      padding: 5px 10px;
+      border-radius: 3px;
+    }
+    @media (max-width: 768px) {
+      .row {
+        flex-direction: column;
+      }
+      .column {
+        margin-bottom: 20px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Akıllı Süpürge Robot Kontrol Paneli</h1>
+    
+    <div class="row">
+      <div class="column">
+        <div class="camera-view">
+          <img id="cameraStream" src="" alt="Kamera görüntüsü yükleniyor...">
+        </div>
+        
+        <div class="control-panel">
+          <h2>Mod Kontrolü</h2>
+          <div class="mode-toggle">
+            <button id="manualModeBtn" class="btn btn-primary btn-active" onclick="setMode('manual')">Manuel Mod</button>
+            <button id="autoModeBtn" class="btn btn-secondary" onclick="setMode('auto')">Otomatik Mod</button>
+          </div>
+          
+          <h2>Vakum Kontrolü</h2>
+          <div class="vacuum-toggle">
+            <button id="vacuumBtn" class="btn btn-danger" onclick="toggleVacuum()">Vakum KAPALI</button>
+          </div>
+        </div>
+      </div>
+      
+      <div class="column">
+        <div class="control-panel">
+          <h2>Manuel Kontrol</h2>
+          <div class="manual-controls">
+            <button class="btn btn-primary btn-up" onclick="move('forward')">▲</button>
+            <button class="btn btn-primary btn-left" onclick="move('left')">◄</button>
+            <button class="btn btn-danger btn-stop" onclick="move('stop')">■</button>
+            <button class="btn btn-primary btn-right" onclick="move('right')">►</button>
+            <button class="btn btn-primary btn-down" onclick="move('backward')">▼</button>
+          </div>
+        </div>
+        
+        <div class="status-panel">
+          <h2>Durum Bilgisi</h2>
+          <div class="status-item">
+            <span class="status-label">Aktif Mod:</span>
+            <span id="currentMode" class="status-value">Manuel</span>
+          </div>
+          <div class="status-item">
+            <span class="status-label">Vakum Durumu:</span>
+            <span id="vacuumStatus" class="status-value">KAPALI</span>
+          </div>
+          <div class="status-item">
+            <span class="status-label">Mesafe Sensörü:</span>
+            <span id="distanceValue" class="status-value">-- cm</span>
+          </div>
+          <div class="status-item">
+            <span class="status-label">Bağlantı Durumu:</span>
+            <span id="connectionStatus" class="status-value">Bağlı</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    var websocket;
+    var isAutoMode = false;
+    var isVacuumOn = false;
+
+    function initWebSocket() {
+      console.log('WebSocket bağlantısı başlatılıyor...');
+      websocket = new WebSocket('ws://' + window.location.hostname + ':81/');
+      websocket.onopen = onWebSocketOpen;
+      websocket.onclose = onWebSocketClose;
+      websocket.onmessage = onWebSocketMessage;
+    }
+
+    function onWebSocketOpen(event) {
+      console.log('WebSocket bağlandı!');
+      document.getElementById('connectionStatus').textContent = 'Bağlı';
+      // Başlangıç durumunu al
+      websocket.send("getStatus");
+    }
+
+    function onWebSocketClose(event) {
+      console.log('WebSocket bağlantısı kesildi!');
+      document.getElementById('connectionStatus').textContent = 'Bağlantı Kesildi';
+      setTimeout(initWebSocket, 2000);
+    }
+
+    function onWebSocketMessage(event) {
+      console.log('Mesaj alındı:', event.data);
+      var data = JSON.parse(event.data);
+      
+      if (data.mode !== undefined) {
+        isAutoMode = data.mode === 'auto';
+        updateModeButtons();
+      }
+      
+      if (data.vacuum !== undefined) {
+        isVacuumOn = data.vacuum;
+        updateVacuumButton();
+      }
+      
+      if (data.distance !== undefined) {
+        document.getElementById('distanceValue').textContent = data.distance + ' cm';
+      }
+    }
+
+    function updateModeButtons() {
+      document.getElementById('currentMode').textContent = isAutoMode ? 'Otomatik' : 'Manuel';
+      
+      if (isAutoMode) {
+        document.getElementById('autoModeBtn').classList.add('btn-active');
+        document.getElementById('autoModeBtn').classList.remove('btn-secondary');
+        document.getElementById('autoModeBtn').classList.add('btn-success');
+        
+        document.getElementById('manualModeBtn').classList.remove('btn-active');
+        document.getElementById('manualModeBtn').classList.remove('btn-primary');
+        document.getElementById('manualModeBtn').classList.add('btn-secondary');
+      } else {
+        document.getElementById('manualModeBtn').classList.add('btn-active');
+        document.getElementById('manualModeBtn').classList.remove('btn-secondary');
+        document.getElementById('manualModeBtn').classList.add('btn-primary');
+        
+        document.getElementById('autoModeBtn').classList.remove('btn-active');
+        document.getElementById('autoModeBtn').classList.remove('btn-success');
+        document.getElementById('autoModeBtn').classList.add('btn-secondary');
+      }
+    }
+
+    function updateVacuumButton() {
+      var vacuumBtn = document.getElementById('vacuumBtn');
+      
+      if (isVacuumOn) {
+        vacuumBtn.textContent = 'Vakum AÇIK';
+        vacuumBtn.classList.remove('btn-danger');
+        vacuumBtn.classList.add('btn-success');
+      } else {
+        vacuumBtn.textContent = 'Vakum KAPALI';
+        vacuumBtn.classList.remove('btn-success');
+        vacuumBtn.classList.add('btn-danger');
+      }
+      
+      document.getElementById('vacuumStatus').textContent = isVacuumOn ? 'AÇIK' : 'KAPALI';
+    }
+
+    function setMode(mode) {
+      websocket.send('MODE_' + mode.toUpperCase());
+    }
+
+    function toggleVacuum() {
+      websocket.send(isVacuumOn ? 'VACUUM_OFF' : 'VACUUM_ON');
+    }
+
+    function move(direction) {
+      if (!isAutoMode) {
+        switch(direction) {
+          case 'forward':
+            websocket.send('MOVE_FORWARD');
+            break;
+          case 'backward':
+            websocket.send('MOVE_BACKWARD');
+            break;
+          case 'left':
+            websocket.send('TURN_LEFT');
+            break;
+          case 'right':
+            websocket.send('TURN_RIGHT');
+            break;
+          case 'stop':
+            websocket.send('STOP');
+            break;
+        }
+      }
+    }
+
+    function updateCamera() {
+      var img = document.getElementById('cameraStream');
+      img.src = '/stream?' + new Date().getTime(); // Cache busting
+    }
+
+    // 100ms aralıklarla mesafe bilgisini güncelle
+    setInterval(function() {
+      if (websocket.readyState === WebSocket.OPEN) {
+        websocket.send('GET_DISTANCE');
+      }
+    }, 1000);
+
+    // Kamera görüntüsünü düzenli aralıklarla güncelle
+    setInterval(updateCamera, 500);
+
+    window.onload = function() {
+      initWebSocket();
+      updateCamera();
+    };
+  </script>
+</body>
+</html>
+)rawliteral";
+
+void setup() {
+  // Seri port iletişimi
+  Serial.begin(115200); // Arduino ile iletişim için
+  Serial2.begin(115200, SERIAL_8N1, RXD2, TXD2); // UART iletişimi için
+  
+  // Kamera yapılandırması
+  camera_config_t config;
+  config.ledc_channel = LEDC_CHANNEL_0;
+  config.ledc_timer = LEDC_TIMER_0;
+  config.pin_d0 = Y2_GPIO_NUM;
+  config.pin_d1 = Y3_GPIO_NUM;
+  config.pin_d2 = Y4_GPIO_NUM;
+  config.pin_d3 = Y5_GPIO_NUM;
+  config.pin_d4 = Y6_GPIO_NUM;
+  config.pin_d5 = Y7_GPIO_NUM;
+  config.pin_d6 = Y8_GPIO_NUM;
+  config.pin_d7 = Y9_GPIO_NUM;
+  config.pin_xclk = XCLK_GPIO_NUM;
+  config.pin_pclk = PCLK_GPIO_NUM;
+  config.pin_vsync = VSYNC_GPIO_NUM;
+  config.pin_href = HREF_GPIO_NUM;
+  config.pin_sscb_sda = SIOD_GPIO_NUM;
+  config.pin_sscb_scl = SIOC_GPIO_NUM;
+  config.pin_pwdn = PWDN_GPIO_NUM;
+  config.pin_reset = RESET_GPIO_NUM;
+  config.xclk_freq_hz = 20000000;
+  config.pixel_format = PIXFORMAT_JPEG;
+  
+  // PSRAM olup olmadığını kontrol et
+  if(psramFound()){
+    config.frame_size = FRAMESIZE_VGA; // 640x480
+    config.jpeg_quality = 10;  // 0-63, düşük değer daha yüksek kalite
+    config.fb_count = 2;
+  } else {
+    config.frame_size = FRAMESIZE_QVGA; // 320x240
+    config.jpeg_quality = 12;
+    config.fb_count = 1;
+  }
+  
+  // Kamerayı başlat
+  esp_err_t err = esp_camera_init(&config);
+  if (err != ESP_OK) {
+    Serial.printf("Kamera başlatma hatası 0x%x", err);
+    return;
+  }
+  
+  // WiFi Access Point modunda başlat
+  WiFi.softAP(ssid, password);
+  IPAddress IP = WiFi.softAPIP();
+  Serial.print("AP IP adresi: ");
+  Serial.println(IP);
+  
+  // Web sunucusu rotalarını tanımla
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
+    request->send_P(200, "text/html", index_html);
+  });
+  
+  // Kamera stream için HTTP handler
+  server.on("/stream", HTTP_GET, [](AsyncWebServerRequest *request){
+    streamCameraStill(request);
+  });
+  
+  // Web sunucusunu başlat
+  server.begin();
+  
+  // WebSocket sunucusunu başlat
+  webSocket.begin();
+  webSocket.onEvent(onWebSocketEvent);
+  
+  Serial.println("Sistem başlatıldı!");
+}
+
+void loop() {
+  webSocket.loop();
+  
+  // Arduino'dan gelen verileri oku
+  if (Serial2.available()) {
+    String response = Serial2.readStringUntil('\n');
+    Serial.println("Arduino'dan: " + response);
+    
+    if (response.startsWith("DISTANCE:")) {
+      lastDistance = response.substring(9).toInt();
+      String json = "{\"distance\":" + String(lastDistance) + "}";
+      webSocket.broadcastTXT(json.c_str(), json.length());
+    }
+    else if (response == "AUTO_MODE_ACTIVATED") {
+      isAutoMode = true;
+      String json = "{\"mode\":\"auto\"}";
+      webSocket.broadcastTXT(json.c_str(), json.length());
+    }
+    else if (response == "MANUAL_MODE_ACTIVATED") {
+      isAutoMode = false;
+      String json = "{\"mode\":\"manual\"}";
+      webSocket.broadcastTXT(json.c_str(), json.length());
+    }
+    else if (response == "VACUUM_ON") {
+      isVacuumOn = true;
+      String json = "{\"vacuum\":true}";
+      webSocket.broadcastTXT(json.c_str(), json.length());
+    }
+    else if (response == "VACUUM_OFF") {
+      isVacuumOn = false;
+      String json = "{\"vacuum\":false}";
+      webSocket.broadcastTXT(json.c_str(), json.length());
+    }
+  }
+}
+
+void onWebSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length) {
+  // WebSocket olayları için
+  switch(type) {
+    case WStype_DISCONNECTED:
+      Serial.printf("[%u] Bağlantı kesildi!\n", num);
+      break;
+    case WStype_CONNECTED:
+      {
+        IPAddress ip = webSocket.remoteIP(num);
+        Serial.printf("[%u] %d.%d.%d.%d bağlandı\n", num, ip[0], ip[1], ip[2], ip[3]);
+        
+        // Bağlantı sonrası mevcut durumu gönder
+        String json = "{\"mode\":\"" + String(isAutoMode ? "auto" : "manual") + "\",";
+        json += "\"vacuum\":" + String(isVacuumOn ? "true" : "false") + ",";
+        json += "\"distance\":" + String(lastDistance) + "}";
+        webSocket.sendTXT(num, json);
+      }
+      break;
+    case WStype_TEXT:
+      {
+        String cmd = String((char *)payload);
+        Serial.printf("[%u] Gelen komut: %s\n", num, cmd.c_str());
+        
+        // Komutları Arduino'ya ilet
+        if (cmd == "MODE_AUTO") {
+          Serial2.println("MODE_AUTO");
+          isAutoMode = true;
+        }
+        else if (cmd == "MODE_MANUAL") {
+          Serial2.println("MODE_MANUAL");
+          isAutoMode = false;
+        }
+        else if (cmd == "MOVE_FORWARD") {
+          Serial2.println("MOVE_FORWARD");
+        }
+        else if (cmd == "MOVE_BACKWARD") {
+          Serial2.println("MOVE_BACKWARD");
+        }
+        else if (cmd == "TURN_LEFT") {
+          Serial2.println("TURN_LEFT");
+        }
+        else if (cmd == "TURN_RIGHT") {
+          Serial2.println("TURN_RIGHT");
+        }
+        else if (cmd == "STOP") {
+          Serial2.println("STOP");
+        }
+        else if (cmd == "VACUUM_ON") {
+          Serial2.println("VACUUM_ON");
+          isVacuumOn = true;
+        }
+        else if (cmd == "VACUUM_OFF") {
+          Serial2.println("VACUUM_OFF");
+          isVacuumOn = false;
+        }
+        else if (cmd == "GET_DISTANCE") {
+          Serial2.println("GET_DISTANCE");
+        }
+        else if (cmd == "getStatus") {
+          String json = "{\"mode\":\"" + String(isAutoMode ? "auto" : "manual") + "\",";
+          json += "\"vacuum\":" + String(isVacuumOn ? "true" : "false") + ",";
+          json += "\"distance\":" + String(lastDistance) + "}";
+          webSocket.sendTXT(num, json);
+        }
+      }
+      break;
+  }
+}
+
+void streamCameraStill(AsyncWebServerRequest *request) {
+  camera_fb_t * fb = NULL;
+  fb = esp_camera_fb_get();
+  if (!fb) {
+    Serial.println("Kamera görüntüsü alınamadı");
+    request->send(500, "text/plain", "Kamera hatası");
+    return;
+  }
+  
+  request->send_P(200, "image/jpeg", (const uint8_t *)fb->buf, fb->len);
+  
+  esp_camera_fb_return(fb);
+}
