@@ -1,0 +1,178 @@
+#include <esp_now.h>
+#include <WiFi.h>
+#include <Wire.h>
+#include <Adafruit_Sensor.h>
+#include <Adafruit_BME280.h>
+#include <DHT.h>
+#include <LiquidCrystal_I2C.h>
+
+// Define pins
+#define MQ2_PIN 34        // Analog pin for MQ2 gas sensor
+#define DHT_PIN 4         // Digital pin for DHT11
+#define SOUND_SENSOR_PIN 35 // Analog pin for sound sensor
+#define PIR_PIN 5         // Digital pin for PIR motion sensor
+#define DHT_TYPE DHT11    // DHT sensor type
+
+// MAC Address of the receiver ESP32-CAM
+uint8_t receiverMacAddress[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}; // Replace with your ESP32-CAM MAC
+
+// Create objects
+Adafruit_BME280 bme;
+DHT dht(DHT_PIN, DHT_TYPE);
+LiquidCrystal_I2C lcd(0x27, 16, 2); // I2C address 0x27, 16 columns and 2 rows
+
+// Structure to send data
+// Must match the receiver structure
+typedef struct sensor_data {
+  float temperature_dht;
+  float humidity_dht;
+  float temperature_bme;
+  float humidity_bme;
+  float pressure_bme;
+  float gas_level;
+  bool motion_detected;
+  int sound_level;
+} sensor_data;
+
+// Create a structured object
+sensor_data sensorReadings;
+
+// Callback function called when data is sent
+void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
+  Serial.print("Last Packet Send Status: ");
+  Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Delivery Success" : "Delivery Fail");
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  // Initialize LCD
+  lcd.init();
+  lcd.backlight();
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Initializing...");
+
+  // Initialize sensors
+  dht.begin();
+  if (!bme.begin(0x76)) { // I2C address 0x76 for BME280
+    Serial.println("Could not find a valid BME280 sensor, check wiring!");
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("BME280 error!");
+    while (1);
+  }
+
+  // Set device as a Wi-Fi Station
+  WiFi.mode(WIFI_STA);
+
+  // Initialize ESP-NOW
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("Error initializing ESP-NOW");
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("ESP-NOW error!");
+    return;
+  }
+
+  // Register the send callback
+  esp_now_register_send_cb(OnDataSent);
+  
+  // Register peer
+  esp_now_peer_info_t peerInfo;
+  memset(&peerInfo, 0, sizeof(peerInfo));
+  memcpy(peerInfo.peer_addr, receiverMacAddress, 6);
+  peerInfo.channel = 0;  
+  peerInfo.encrypt = false;
+  
+  // Add peer        
+  if (esp_now_add_peer(&peerInfo) != ESP_OK) {
+    Serial.println("Failed to add peer");
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Peer error!");
+    return;
+  }
+
+  // Setup pins
+  pinMode(PIR_PIN, INPUT);
+  
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("System ready");
+}
+
+void loop() {
+  // Read DHT11 sensor
+  sensorReadings.temperature_dht = dht.readTemperature();
+  sensorReadings.humidity_dht = dht.readHumidity();
+  
+  // Read BME280 sensor
+  sensorReadings.temperature_bme = bme.readTemperature();
+  sensorReadings.humidity_bme = bme.readHumidity();
+  sensorReadings.pressure_bme = bme.readPressure() / 100.0F; // Convert to hPa
+  
+  // Read MQ2 gas sensor
+  sensorReadings.gas_level = analogRead(MQ2_PIN);
+  
+  // Read PIR motion sensor
+  sensorReadings.motion_detected = digitalRead(PIR_PIN);
+  
+  // Read sound sensor
+  sensorReadings.sound_level = analogRead(SOUND_SENSOR_PIN);
+
+  // Display on LCD
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("T:");
+  lcd.print(sensorReadings.temperature_dht);
+  lcd.print("C H:");
+  lcd.print(sensorReadings.humidity_dht);
+  lcd.print("%");
+  
+  lcd.setCursor(0, 1);
+  lcd.print("Gas:");
+  lcd.print(sensorReadings.gas_level);
+  
+  if (sensorReadings.motion_detected) {
+    lcd.setCursor(12, 1);
+    lcd.print("MOT");
+  }
+
+  // Print values to Serial
+  Serial.println("Sensor Readings:");
+  Serial.print("DHT11 - Temperature: ");
+  Serial.print(sensorReadings.temperature_dht);
+  Serial.print(" °C, Humidity: ");
+  Serial.print(sensorReadings.humidity_dht);
+  Serial.println(" %");
+  
+  Serial.print("BME280 - Temperature: ");
+  Serial.print(sensorReadings.temperature_bme);
+  Serial.print(" °C, Humidity: ");
+  Serial.print(sensorReadings.humidity_bme);
+  Serial.print(" %, Pressure: ");
+  Serial.print(sensorReadings.pressure_bme);
+  Serial.println(" hPa");
+  
+  Serial.print("Gas Level: ");
+  Serial.println(sensorReadings.gas_level);
+  
+  Serial.print("Motion Detected: ");
+  Serial.println(sensorReadings.motion_detected ? "Yes" : "No");
+  
+  Serial.print("Sound Level: ");
+  Serial.println(sensorReadings.sound_level);
+  Serial.println();
+
+  // Send message via ESP-NOW
+  esp_err_t result = esp_now_send(receiverMacAddress, (uint8_t *) &sensorReadings, sizeof(sensorReadings));
+  
+  if (result == ESP_OK) {
+    Serial.println("Sent with success");
+  } else {
+    Serial.println("Error sending the data");
+  }
+
+  delay(2000); // Wait 2 seconds before next reading
+}
